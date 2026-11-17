@@ -457,7 +457,9 @@ const dispatchFileToAria2 = async (file) => {
 
     await aria2.addUri(dl.downloadUrls || dl.downloadUrl, {
       header: dl.headers,
-      out: file.file_name
+      out: file.file_name,
+      'max-connection-per-server': '4',
+      split: '8'
     });
     return { ok: true };
   } else if (parsedData.value.type === 'baidu' && window.api?.getBaiduDownloadUrl) {
@@ -473,7 +475,9 @@ const dispatchFileToAria2 = async (file) => {
     if (dl && dl.downloadUrl) {
       await aria2.addUri(dl.downloadUrls || dl.downloadUrl, {
         header: dl.headers,
-        out: file.file_name
+        out: file.file_name,
+        'max-connection-per-server': '2',
+        split: '8'
       });
       return { ok: true };
     }

@@ -6,8 +6,8 @@ const path = require('path');
 /**
  * Local Streaming & Cloud-Drive Accelerator Proxy Server.
  * 1. /stream : HTTP 206 Partial Content local file streaming for "边下边播"
- * 2. /proxy  : Local HTTP-to-HTTPS Range proxy for Baidu/Quark Netdisk,
- *              with automatic mirror failover and header sanitization.
+ * 2. /proxy  : Local HTTP-to-HTTPS multi-CDN Range proxy for Baidu/Quark Netdisk,
+ *              distributing connections across CDN mirrors and auto-retrying on 403 concurrency limits.
  */
 class StreamServer {
   constructor() {
@@ -49,8 +49,7 @@ class StreamServer {
   }
 
   /**
-   * Registers a netdisk download task in the local proxy and returns the local URL for Aria2.
-   * Aria2 automatically opens 16 parallel Range connections to this local endpoint.
+   * Registers a netdisk download task in the local proxy and returns local mirror URLs for Aria2.
    */
   registerNetdiskProxy({ urls, userAgent, cookie, referer, fileName }) {
     const id = `nd_${Date.now()}_${this.proxyCounter++}`;
@@ -60,14 +59,19 @@ class StreamServer {
       userAgent: userAgent || 'netdisk;P2SP;3.0.0.123',
       cookie: cookie || '',
       referer: referer || '',
-      fileName: fileName || 'download.bin'
+      fileName: fileName || 'download.bin',
+      rrIndex: 0
     });
 
-    const proxyUrl = `http://127.0.0.1:${this.port}/proxy?id=${id}`;
+    const mirrorCount = Math.max(1, validUrls.length);
+    const proxyUrls = [];
+    for (let i = 0; i < mirrorCount; i++) {
+      proxyUrls.push(`http://127.0.0.1:${this.port}/proxy?id=${id}&m=${i}`);
+    }
     return {
       id,
-      proxyUrl,
-      proxyUrls: [proxyUrl]
+      proxyUrl: proxyUrls[0],
+      proxyUrls
     };
   }
 
@@ -86,6 +90,7 @@ class StreamServer {
 
   handleProxyRequest(req, res, parsedUrl) {
     const id = parsedUrl.searchParams.get('id');
+    const mParam = parseInt(parsedUrl.searchParams.get('m') || '0', 10);
     const entry = this.proxyMap.get(id);
 
     if (!entry || !entry.urls || entry.urls.length === 0) {
@@ -94,11 +99,13 @@ class StreamServer {
       return;
     }
 
+    const startIdx = (isNaN(mParam) ? entry.rrIndex++ : mParam) % entry.urls.length;
     const clientSentRange = Boolean(req.headers.range);
-    this.forwardUpstream(entry, 0, entry.urls[0], req, res, clientSentRange, 0);
+    this.forwardUpstream(entry, startIdx, entry.urls[startIdx], req, res, clientSentRange, 0, 0);
   }
 
-  forwardUpstream(entry, urlIndex, targetUrl, clientReq, clientRes, clientSentRange, redirectDepth) {
+  forwardUpstream(entry, urlIndex, targetUrl, clientReq, clientRes, clientSentRange, redirectDepth, retryCount) {
+    if (clientReq.destroyed) return;
     if (redirectDepth > 5) {
       if (!clientRes.headersSent) clientRes.writeHead(502);
       clientRes.end('Too many redirects');
@@ -118,15 +125,13 @@ class StreamServer {
     const transport = isHttps ? https : http;
     const isBaiduPcsCdn = parsed.hostname.endsWith('baidupcs.com');
 
-    // Baidu PCS CDN forbids HEAD requests and requires Range header;
-    // Also Baidu PCS CDN signed URLs do not want browser Referer or bloated Cookie headers.
     const upstreamHeaders = {
       'User-Agent': entry.userAgent,
       'Accept': '*/*',
       'Connection': 'keep-alive',
       'Range': clientReq.headers.range || 'bytes=0-'
     };
-    if (!isBaiduPcsCdn && entry.cookie) {
+    if (entry.cookie) {
       upstreamHeaders['Cookie'] = entry.cookie;
     }
     if (!isBaiduPcsCdn && entry.referer) {
@@ -147,14 +152,21 @@ class StreamServer {
       if ([301, 302, 303, 307, 308].includes(upRes.statusCode) && upRes.headers.location) {
         upRes.resume();
         const nextUrl = new URL(upRes.headers.location, targetUrl).toString();
-        return this.forwardUpstream(entry, urlIndex, nextUrl, clientReq, clientRes, clientSentRange, redirectDepth + 1);
+        return this.forwardUpstream(entry, urlIndex, nextUrl, clientReq, clientRes, clientSentRange, redirectDepth + 1, retryCount);
       }
 
-      // If primary mirror returned 403/5xx, automatically failover to the next mirror URL!
-      if (upRes.statusCode >= 400 && urlIndex + 1 < entry.urls.length) {
+      // If this CDN mirror returned 403/503 due to per-node connection concurrency limit,
+      // rotate to the next CDN mirror after a short backoff so Aria2 never aborts!
+      if (upRes.statusCode >= 400 && retryCount < entry.urls.length * 2) {
         upRes.resume();
-        const nextMirror = entry.urls[urlIndex + 1];
-        return this.forwardUpstream(entry, urlIndex + 1, nextMirror, clientReq, clientRes, clientSentRange, 0);
+        const nextIdx = (urlIndex + 1) % entry.urls.length;
+        const nextMirror = entry.urls[nextIdx];
+        setTimeout(() => {
+          if (!clientReq.destroyed && !clientRes.headersSent) {
+            this.forwardUpstream(entry, nextIdx, nextMirror, clientReq, clientRes, clientSentRange, 0, retryCount + 1);
+          }
+        }, 250);
+        return;
       }
 
       const status = upRes.statusCode || 200;
@@ -190,10 +202,16 @@ class StreamServer {
       });
     });
 
-    upReq.on('error', (err) => {
-      if (urlIndex + 1 < entry.urls.length && !clientRes.headersSent) {
-        const nextMirror = entry.urls[urlIndex + 1];
-        return this.forwardUpstream(entry, urlIndex + 1, nextMirror, clientReq, clientRes, clientSentRange, 0);
+    upReq.on('error', () => {
+      if (retryCount < entry.urls.length * 2 && !clientRes.headersSent && !clientReq.destroyed) {
+        const nextIdx = (urlIndex + 1) % entry.urls.length;
+        const nextMirror = entry.urls[nextIdx];
+        setTimeout(() => {
+          if (!clientReq.destroyed && !clientRes.headersSent) {
+            this.forwardUpstream(entry, nextIdx, nextMirror, clientReq, clientRes, clientSentRange, 0, retryCount + 1);
+          }
+        }, 250);
+        return;
       }
       if (!clientRes.headersSent) {
         clientRes.writeHead(502);

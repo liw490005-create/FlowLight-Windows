@@ -314,7 +314,9 @@ const extractCurrentNetdiskDirectLink = async () => {
         if (dl && dl.downloadUrl) {
           await aria2.addUri(dl.downloadUrls || dl.downloadUrl, {
             header: dl.headers,
-            out: file.file_name
+            out: file.file_name,
+            'max-connection-per-server': '2',
+            split: '8'
           });
           addedCount++;
         }
@@ -327,7 +329,9 @@ const extractCurrentNetdiskDirectLink = async () => {
         if (dl && dl.downloadUrl) {
           await aria2.addUri(dl.downloadUrls || dl.downloadUrl, {
             header: dl.headers,
-            out: file.file_name
+            out: file.file_name,
+            'max-connection-per-server': '4',
+            split: '8'
           });
           addedCount++;
         }

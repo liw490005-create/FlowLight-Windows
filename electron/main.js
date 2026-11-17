@@ -327,7 +327,7 @@ ipcMain.handle('netdisk:getBaiduDownloadUrl', async (event, params) => {
     urls: dl.downloadUrls || [dl.downloadUrl],
     userAgent: ua,
     cookie: cookieStr,
-    referer: 'https://pan.baidu.com/disk/home',
+    referer: '',
     fileName: params.file_name
   });
   return {
