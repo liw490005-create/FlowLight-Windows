@@ -1,0 +1,32 @@
+{
+  "name": "flowlight-windows",
+  "version": "1.0.9",
+  "description": "流光下载 Windows 纯净专业版 - 高性能磁力/BT/多线程下载与流媒体播放器",
+  "main": "electron/main.js",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "start": "vite build && electron .",
+    "electron:dev": "electron ."
+  },
+  "keywords": [
+    "downloader",
+    "bittorrent",
+    "magnet",
+    "aria2",
+    "electron"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "lucide-vue-next": "^0.577.0",
+    "vue": "^3.5.13"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.3.5",
+    "@vitejs/plugin-vue": "^5.2.1",
+    "electron": "^34.2.0",
+    "tailwindcss": "^4.0.0",
+    "vite": "^6.1.1"
+  }
+}

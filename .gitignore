@@ -1,0 +1,5 @@
+node_modules/
+bin/aria2.session
+bin/dht.dat
+*.log
+.DS_Store
