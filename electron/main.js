@@ -301,14 +301,40 @@ ipcMain.handle('netdisk:parseShare', async (event, { type, url, passcode, dirPat
   }
 });
 
-ipcMain.handle('netdisk:getQuarkDownloadUrl', async (event, { pwd_id, stoken, fid }) => {
+ipcMain.handle('netdisk:getQuarkDownloadUrl', async (event, { pwd_id, stoken, fid, file_name }) => {
   const cookieStr = await getCombinedDomainCookies('quark.cn');
-  return await netdiskService.getQuarkDownloadUrl(pwd_id, stoken, fid, cookieStr);
+  const dl = await netdiskService.getQuarkDownloadUrl(pwd_id, stoken, fid, cookieStr);
+  const proxy = streamServer.registerNetdiskProxy({
+    urls: dl.downloadUrls || [dl.downloadUrl],
+    userAgent: netdiskService.userAgent,
+    cookie: cookieStr,
+    referer: 'https://pan.quark.cn/',
+    fileName: file_name
+  });
+  return {
+    downloadUrl: proxy.proxyUrl,
+    downloadUrls: proxy.proxyUrls,
+    headers: []
+  };
 });
 
 ipcMain.handle('netdisk:getBaiduDownloadUrl', async (event, params) => {
   const cookieStr = await getCombinedDomainCookies('baidu.com');
-  return await netdiskService.getBaiduDownloadUrl(params, cookieStr);
+  const dl = await netdiskService.getBaiduDownloadUrl(params, cookieStr);
+  const uaHeader = (dl.headers || []).find(h => h.toLowerCase().startsWith('user-agent:'));
+  const ua = uaHeader ? uaHeader.split(':').slice(1).join(':').trim() : netdiskService.baiduPcsUa;
+  const proxy = streamServer.registerNetdiskProxy({
+    urls: dl.downloadUrls || [dl.downloadUrl],
+    userAgent: ua,
+    cookie: cookieStr,
+    referer: 'https://pan.baidu.com/disk/home',
+    fileName: params.file_name
+  });
+  return {
+    downloadUrl: proxy.proxyUrl,
+    downloadUrls: proxy.proxyUrls,
+    headers: []
+  };
 });
 
 if (gotTheLock) {
