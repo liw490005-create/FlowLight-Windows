@@ -260,20 +260,27 @@ ipcMain.handle('magnet:search', async (event, { keyword, page }) => {
 
 // --- Netdisk IPC Handlers ---
 
-ipcMain.handle('netdisk:getCookies', async (event, domain) => {
+async function getCombinedDomainCookies(baseDomain) {
   try {
-    const cookies = await session.defaultSession.cookies.get({ domain });
-    return cookies.map(c => `${c.name}=${c.value}`).join('; ');
+    const all = await session.defaultSession.cookies.get({});
+    const clean = baseDomain.replace(/^\./, '');
+    const matched = all.filter(c => c.domain && c.domain.includes(clean));
+    const map = new Map();
+    matched.forEach(c => map.set(c.name, c.value));
+    return Array.from(map.entries()).map(([k, v]) => `${k}=${v}`).join('; ');
   } catch (e) {
     return '';
   }
+}
+
+ipcMain.handle('netdisk:getCookies', async (event, domain) => {
+  return await getCombinedDomainCookies(domain);
 });
 
 ipcMain.handle('netdisk:parseShare', async (event, { type, url, passcode, dirPath, pdir_fid }) => {
   const detectedType = netdiskService.detectNetdiskType(url) || type;
-  const domain = detectedType === 'quark' ? '.quark.cn' : '.baidu.com';
-  const cookies = await session.defaultSession.cookies.get({ domain });
-  const cookieStr = cookies.map(c => `${c.name}=${c.value}`).join('; ');
+  const domain = detectedType === 'quark' ? 'quark.cn' : 'baidu.com';
+  const cookieStr = await getCombinedDomainCookies(domain);
 
   if (detectedType === 'quark') {
     return await netdiskService.parseQuarkShare(url, passcode, cookieStr, pdir_fid || '0');
@@ -295,14 +302,12 @@ ipcMain.handle('netdisk:parseShare', async (event, { type, url, passcode, dirPat
 });
 
 ipcMain.handle('netdisk:getQuarkDownloadUrl', async (event, { pwd_id, stoken, fid }) => {
-  const cookies = await session.defaultSession.cookies.get({ domain: '.quark.cn' });
-  const cookieStr = cookies.map(c => `${c.name}=${c.value}`).join('; ');
+  const cookieStr = await getCombinedDomainCookies('quark.cn');
   return await netdiskService.getQuarkDownloadUrl(pwd_id, stoken, fid, cookieStr);
 });
 
 ipcMain.handle('netdisk:getBaiduDownloadUrl', async (event, params) => {
-  const cookies = await session.defaultSession.cookies.get({ domain: '.baidu.com' });
-  const cookieStr = cookies.map(c => `${c.name}=${c.value}`).join('; ');
+  const cookieStr = await getCombinedDomainCookies('baidu.com');
   return await netdiskService.getBaiduDownloadUrl(params, cookieStr);
 });
 

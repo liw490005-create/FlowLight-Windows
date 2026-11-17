@@ -3,12 +3,13 @@ const http = require('http');
 
 /**
  * Netdisk Service (Baidu Wangpan & Quark Netdisk).
- * Implements share link parsing, auto-transfer (转存), xpan/multimedia dlink extraction, and Aria2 dispatch.
+ * Implements share link parsing, deduplicated auto-transfer (转存),
+ * PCS multi-CDN locatedownload + /api/download sign2 extraction, and Aria2 dispatch.
  */
 class NetdiskService {
   constructor() {
     this.userAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36';
-    this.baiduPcsUa = 'pan.baidu.com';
+    this.baiduPcsUa = 'netdisk;P2SP;3.0.0.123';
   }
 
   detectNetdiskType(url) {
@@ -22,6 +23,34 @@ class NetdiskService {
     if (!text) return '';
     const match = text.match(/(?:提取码|密码|pwd|code|passcode)[:：=\s]*([a-zA-Z0-9]{4,8})/i);
     return match ? match[1] : '';
+  }
+
+  computeBaiduSign(j, r) {
+    if (!j || !r) return '';
+    const a = [];
+    const p = [];
+    let o = '';
+    const v = j.length;
+    for (let q = 0; q < 256; q++) {
+      a[q] = j.charCodeAt(q % v);
+      p[q] = q;
+    }
+    for (let u = 0, q = 0; q < 256; q++) {
+      u = (u + p[q] + a[q]) % 256;
+      const t = p[q];
+      p[q] = p[u];
+      p[u] = t;
+    }
+    for (let i = 0, u = 0, q = 0; q < r.length; q++) {
+      i = (i + 1) % 256;
+      u = (u + p[i]) % 256;
+      const t = p[i];
+      p[i] = p[u];
+      p[u] = t;
+      const k = p[(p[i] + p[u]) % 256];
+      o += String.fromCharCode(r.charCodeAt(q) ^ k);
+    }
+    return Buffer.from(o, 'binary').toString('base64');
   }
 
   // --- Quark Netdisk Implementation ---
@@ -40,7 +69,6 @@ class NetdiskService {
 
     const passcode = (inputPasscode || '').trim() || this.extractPasscode(shareUrl);
 
-    // 1. Get Stoken from Quark API
     const tokenPayload = JSON.stringify({
       pwd_id,
       passcode
@@ -63,7 +91,6 @@ class NetdiskService {
 
     const stoken = tokenRes.data.stoken;
 
-    // 2. Get File List Detail
     const detailUrl = `https://drive-pc.quark.cn/1/clouddrive/share/sharepage/detail?pwd_id=${pwd_id}&stoken=${encodeURIComponent(stoken)}&pdir_fid=${pdir_fid}&page=1&size=100`;
     const detailRes = await this.requestJson(detailUrl, {
       method: 'GET',
@@ -128,6 +155,7 @@ class NetdiskService {
     if (res.status === 200 && res.data && res.data[0] && res.data[0].download_url) {
       return {
         downloadUrl: res.data[0].download_url,
+        downloadUrls: [res.data[0].download_url],
         headers: [
           `User-Agent: ${this.userAgent}`,
           'Referer: https://pan.quark.cn/',
@@ -263,24 +291,24 @@ class NetdiskService {
   /**
    * Complete Baidu Direct-Link Pipeline (without needing Baidu PC Client / baiduyunguanjia://):
    * 1. Check BDUSS login cookie
-   * 2. Get user bdstoken
-   * 3. Auto-transfer shared file into user's root directory (/)
-   * 4. Query xpan/multimedia?method=filemetas&dlink=1 to extract unencrypted PCS dlink
+   * 2. Fetch bdstoken, sign1, sign3, timestamp from /api/gettemplatevariable
+   * 3. Check if file already exists in user's root (/); if not, auto-transfer via /share/transfer
+   * 4. Extract multi-CDN direct URLs via PCS locatedownload (app_id=250528 / 778750) + fallback /api/download
    */
   async getBaiduDownloadUrl(params, userCookie = '') {
     const { surl, randsk, share_id, uk, fid, file_name } = params;
 
     if (!userCookie || !userCookie.includes('BDUSS=')) {
-      throw new Error('NEED_BAIDU_LOGIN:百度网盘大于 50MB 的文件需要登录百度账号才能免客户端提取直链。请点击上方【在内置浏览器登录】登录您的百度网盘账号，登录成功后回来点击【高速下载】即可自动转存并直推 Aria2！');
+      throw new Error('NEED_BAIDU_LOGIN:百度网盘大于 50MB 的文件需要登录百度账号才能免客户端提取直链。请点击上方【在内置浏览器登录】登录您的百度网盘账号，登录成功后点击下载即可自动转存并直推 Aria2！');
     }
 
     const cookieHeader = [
       userCookie,
-      randsk ? `BDCLND=${randsk}` : ''
+      randsk && !userCookie.includes('BDCLND=') ? `BDCLND=${randsk}` : ''
     ].filter(Boolean).join('; ');
 
-    // Step 1: Get bdstoken of logged-in user
-    const tplVarUrl = 'https://pan.baidu.com/api/gettemplatevariable?fields=%5B%22bdstoken%22%2C%22token%22%2C%22uk%22%2C%22isdocuser%22%5D&channel=chunlei&web=1&app_id=250528&clienttype=0';
+    // Step 1: Get bdstoken, sign1, sign3, timestamp of logged-in user
+    const tplVarUrl = 'https://pan.baidu.com/api/gettemplatevariable?fields=%5B%22bdstoken%22%2C%22token%22%2C%22uk%22%2C%22isdocuser%22%2C%22sign1%22%2C%22sign2%22%2C%22sign3%22%2C%22timestamp%22%5D&channel=chunlei&web=1&app_id=250528&clienttype=0';
     const varRes = await this.requestJson(tplVarUrl, {
       method: 'GET',
       headers: {
@@ -290,33 +318,55 @@ class NetdiskService {
       }
     });
 
-    const bdstoken = varRes?.result?.bdstoken || '';
+    const { bdstoken, sign1, sign3, timestamp } = varRes?.result || {};
     if (!bdstoken) {
       throw new Error('NEED_BAIDU_LOGIN:百度网盘登录状态已过期，请点击【在内置浏览器登录】重新登录您的百度账号');
     }
 
-    // Step 2: Auto-transfer file to user's own root directory (/) so xpan/multimedia can generate dlink
     let targetFsId = null;
-    const transferUrl = `https://pan.baidu.com/share/transfer?shareid=${share_id}&from=${uk}&ondup=newcopy&async=0&channel=chunlei&web=1&app_id=250528&bdstoken=${bdstoken}&clienttype=0${randsk ? '&sekey=' + randsk : ''}`;
-    const transferRes = await this.requestJson(transferUrl, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
-        'User-Agent': this.userAgent,
-        'Referer': `https://pan.baidu.com/s/1${surl}`,
-        'Cookie': cookieHeader
-      },
-      body: `fsidlist=%5B${fid}%5D&path=%2F`
-    });
+    let targetPath = null;
 
-    if (transferRes && transferRes.errno === 0 && transferRes.extra && Array.isArray(transferRes.extra.list) && transferRes.extra.list[0]) {
-      const transferredItem = transferRes.extra.list[0];
-      if (transferredItem.to_fs_id) {
-        targetFsId = String(transferredItem.to_fs_id);
-      } else if (transferredItem.to) {
-        // Query /api/list to get fs_id of the newly transferred file
-        const userListUrl = `https://pan.baidu.com/api/list?order=time&desc=1&num=50&page=1&dir=%2F&web=1&app_id=250528&bdstoken=${bdstoken}&clienttype=0`;
-        const userListRes = await this.requestJson(userListUrl, {
+    // Step 2a: Check if the file is already in user's root directory (/) to avoid duplicate transfers
+    const userListUrl = `https://pan.baidu.com/api/list?order=time&desc=1&num=100&page=1&dir=%2F&web=1&app_id=250528&bdstoken=${bdstoken}&clienttype=0`;
+    const initialListRes = await this.requestJson(userListUrl, {
+      method: 'GET',
+      headers: {
+        'User-Agent': this.userAgent,
+        'Referer': 'https://pan.baidu.com/disk/main',
+        'Cookie': cookieHeader
+      }
+    }).catch(() => null);
+
+    if (initialListRes && Array.isArray(initialListRes.list)) {
+      const existing = initialListRes.list.find(f => Number(f.isdir) === 0 && f.server_filename === file_name);
+      if (existing) {
+        targetFsId = String(existing.fs_id);
+        targetPath = existing.path;
+      }
+    }
+
+    // Step 2b: If not yet in root directory, auto-transfer from share
+    if (!targetFsId || !targetPath) {
+      const transferUrl = `https://pan.baidu.com/share/transfer?shareid=${share_id}&from=${uk}&ondup=newcopy&async=0&channel=chunlei&web=1&app_id=250528&bdstoken=${bdstoken}&clienttype=0${randsk ? '&sekey=' + randsk : ''}`;
+      const transferRes = await this.requestJson(transferUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+          'User-Agent': this.userAgent,
+          'Referer': `https://pan.baidu.com/s/1${surl}`,
+          'Cookie': cookieHeader
+        },
+        body: `fsidlist=%5B${fid}%5D&path=%2F`
+      });
+
+      if (transferRes && transferRes.errno === 0 && transferRes.extra && Array.isArray(transferRes.extra.list) && transferRes.extra.list[0]) {
+        const transferredItem = transferRes.extra.list[0];
+        if (transferredItem.to_fs_id) targetFsId = String(transferredItem.to_fs_id);
+        if (transferredItem.to) targetPath = transferredItem.to;
+      }
+
+      if (!targetFsId || !targetPath) {
+        const afterListRes = await this.requestJson(userListUrl, {
           method: 'GET',
           headers: {
             'User-Agent': this.userAgent,
@@ -324,15 +374,59 @@ class NetdiskService {
             'Cookie': cookieHeader
           }
         });
-        if (userListRes && Array.isArray(userListRes.list)) {
-          const found = userListRes.list.find(f => f.path === transferredItem.to || f.server_filename === file_name);
-          if (found) targetFsId = String(found.fs_id);
+        if (afterListRes && Array.isArray(afterListRes.list)) {
+          const baseName = file_name ? file_name.replace(/\.[^.]+$/, '') : '';
+          const found = afterListRes.list.find(
+            f => Number(f.isdir) === 0 && (f.server_filename === file_name || (baseName && f.server_filename.startsWith(baseName)))
+          );
+          if (found) {
+            targetFsId = String(found.fs_id);
+            targetPath = found.path;
+          }
         }
       }
-    } else if (transferRes && transferRes.errno === 12) {
-      // File already exists or quota check: look up in root directory
-      const userListUrl = `https://pan.baidu.com/api/list?order=time&desc=1&num=50&page=1&dir=%2F&web=1&app_id=250528&bdstoken=${bdstoken}&clienttype=0`;
-      const userListRes = await this.requestJson(userListUrl, {
+    }
+
+    if (!targetPath && file_name) {
+      targetPath = `/${file_name}`;
+    }
+
+    // Step 3A: Primary Engine - PCS Multi-CDN locatedownload (returns HTTP 206 Partial Content multi-mirror URLs!)
+    for (const appId of ['250528', '778750']) {
+      if (!targetPath) break;
+      try {
+        const locateUrl = `https://d.pcs.baidu.com/rest/2.0/pcs/file?method=locatedownload&app_id=${appId}&ver=4.0&vip=2&path=${encodeURIComponent(targetPath)}`;
+        const locateRes = await this.requestJson(locateUrl, {
+          method: 'GET',
+          headers: {
+            'User-Agent': this.baiduPcsUa,
+            'Cookie': cookieHeader
+          }
+        });
+
+        if (locateRes && Array.isArray(locateRes.urls) && locateRes.urls.length > 0) {
+          const allUrls = locateRes.urls.map(u => u.url).filter(Boolean);
+          if (allUrls.length > 0) {
+            return {
+              downloadUrl: allUrls[0],
+              downloadUrls: allUrls,
+              headers: [
+                `User-Agent: ${this.baiduPcsUa}`,
+                `Cookie: ${cookieHeader}`
+              ]
+            };
+          }
+        }
+      } catch (e) {
+        // try next
+      }
+    }
+
+    // Step 3B: Secondary Engine - Web /api/download with RC4 sign2(sign3, sign1)
+    if (targetFsId && sign1 && sign3) {
+      const sign = this.computeBaiduSign(sign3, sign1);
+      const apiDlUrl = `https://pan.baidu.com/api/download?sign=${encodeURIComponent(sign)}&timestamp=${timestamp}&fidlist=%5B${targetFsId}%5D&type=dlink&vip=2&channel=chunlei&web=1&app_id=250528&bdstoken=${bdstoken}&clienttype=0`;
+      const apiDlRes = await this.requestJson(apiDlUrl, {
         method: 'GET',
         headers: {
           'User-Agent': this.userAgent,
@@ -340,58 +434,22 @@ class NetdiskService {
           'Cookie': cookieHeader
         }
       });
-      if (userListRes && Array.isArray(userListRes.list)) {
-        const found = userListRes.list.find(f => f.server_filename === file_name);
-        if (found) targetFsId = String(found.fs_id);
-      }
-    } else if (transferRes && transferRes.errno !== 0) {
-      throw new Error(`自动转存至您的百度网盘失败 (错误码: ${transferRes.errno})，请检查网盘剩余空间是否充足`);
-    }
 
-    if (!targetFsId) {
-      // Fallback: search by filename in root
-      const userListUrl = `https://pan.baidu.com/api/list?order=time&desc=1&num=30&page=1&dir=%2F&web=1&app_id=250528&bdstoken=${bdstoken}&clienttype=0`;
-      const userListRes = await this.requestJson(userListUrl, {
-        method: 'GET',
-        headers: {
-          'User-Agent': this.userAgent,
-          'Referer': 'https://pan.baidu.com/disk/main',
-          'Cookie': cookieHeader
-        }
-      });
-      if (userListRes && Array.isArray(userListRes.list) && userListRes.list.length > 0) {
-        const found = userListRes.list.find(f => f.server_filename === file_name) || userListRes.list[0];
-        targetFsId = String(found.fs_id);
+      const dlinkItem = Array.isArray(apiDlRes?.dlink) ? apiDlRes.dlink[0]?.dlink : apiDlRes?.dlink;
+      if (dlinkItem && typeof dlinkItem === 'string') {
+        return {
+          downloadUrl: dlinkItem,
+          downloadUrls: [dlinkItem],
+          headers: [
+            'User-Agent: pan.baidu.com',
+            'Referer: https://pan.baidu.com/disk/home',
+            `Cookie: ${cookieHeader}`
+          ]
+        };
       }
     }
 
-    if (!targetFsId) {
-      throw new Error('未能定位转存后的文件 ID，请稍后重试');
-    }
-
-    // Step 3: Call official xpan/multimedia API to obtain unencrypted dlink
-    const metaUrl = `https://pan.baidu.com/rest/2.0/xpan/multimedia?method=filemetas&dlink=1&fsids=%5B${targetFsId}%5D`;
-    const metaRes = await this.requestJson(metaUrl, {
-      method: 'GET',
-      headers: {
-        'User-Agent': this.baiduPcsUa,
-        'Referer': 'https://pan.baidu.com/disk/home',
-        'Cookie': cookieHeader
-      }
-    });
-
-    if (metaRes && metaRes.errno === 0 && Array.isArray(metaRes.list) && metaRes.list[0] && metaRes.list[0].dlink) {
-      return {
-        downloadUrl: metaRes.list[0].dlink,
-        headers: [
-          `User-Agent: ${this.baiduPcsUa}`,
-          'Referer: https://pan.baidu.com/disk/home',
-          `Cookie: ${cookieHeader}`
-        ]
-      };
-    }
-
-    throw new Error(`提取百度网盘直链失败 (错误码: ${metaRes?.errno ?? '未知'})`);
+    throw new Error('提取百度网盘直链失败，请确认网盘空间充足且账号处于正常登录状态');
   }
 
   // --- Generic HTTP/HTTPS Request Helpers ---

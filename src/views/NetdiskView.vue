@@ -455,7 +455,7 @@ const dispatchFileToAria2 = async (file) => {
       fid: file.fid
     });
 
-    await aria2.addUri(dl.downloadUrl, {
+    await aria2.addUri(dl.downloadUrls || dl.downloadUrl, {
       header: dl.headers,
       out: file.file_name
     });
@@ -471,7 +471,7 @@ const dispatchFileToAria2 = async (file) => {
     });
 
     if (dl && dl.downloadUrl) {
-      await aria2.addUri(dl.downloadUrl, {
+      await aria2.addUri(dl.downloadUrls || dl.downloadUrl, {
         header: dl.headers,
         out: file.file_name
       });

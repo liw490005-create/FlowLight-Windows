@@ -312,7 +312,7 @@ const extractCurrentNetdiskDirectLink = async () => {
           file_name: file.file_name
         });
         if (dl && dl.downloadUrl) {
-          await aria2.addUri(dl.downloadUrl, {
+          await aria2.addUri(dl.downloadUrls || dl.downloadUrl, {
             header: dl.headers,
             out: file.file_name
           });
@@ -325,7 +325,7 @@ const extractCurrentNetdiskDirectLink = async () => {
           fid: file.fid
         });
         if (dl && dl.downloadUrl) {
-          await aria2.addUri(dl.downloadUrl, {
+          await aria2.addUri(dl.downloadUrls || dl.downloadUrl, {
             header: dl.headers,
             out: file.file_name
           });
