@@ -469,15 +469,16 @@ const dispatchFileToAria2 = async (file) => {
       share_id: parsedData.value.share_id,
       uk: parsedData.value.uk,
       fid: file.fid,
-      file_name: file.file_name
+      file_name: file.file_name,
+      file_size: file.size
     });
 
     if (dl && dl.downloadUrl) {
       await aria2.addUri(dl.downloadUrls || dl.downloadUrl, {
         header: dl.headers,
         out: file.file_name,
-        'max-connection-per-server': '2',
-        split: '8'
+        'max-connection-per-server': '16',
+        split: '16'
       });
       return { ok: true };
     }

@@ -325,6 +325,7 @@ class NetdiskService {
 
     let targetFsId = null;
     let targetPath = null;
+    let targetFileSize = params.file_size ? Number(params.file_size) : 0;
 
     // Step 2a: Check if the file is already in user's root directory (/) to avoid duplicate transfers
     const userListUrl = `https://pan.baidu.com/api/list?order=time&desc=1&num=100&page=1&dir=%2F&web=1&app_id=250528&bdstoken=${bdstoken}&clienttype=0`;
@@ -342,6 +343,7 @@ class NetdiskService {
       if (existing) {
         targetFsId = String(existing.fs_id);
         targetPath = existing.path;
+        if (existing.size) targetFileSize = Number(existing.size);
       }
     }
 
@@ -382,9 +384,14 @@ class NetdiskService {
           if (found) {
             targetFsId = String(found.fs_id);
             targetPath = found.path;
+            if (found.size) targetFileSize = Number(found.size);
           }
         }
       }
+    }
+
+    if (!targetFileSize && params.file_size) {
+      targetFileSize = Number(params.file_size);
     }
 
     if (!targetPath && file_name) {
@@ -410,6 +417,7 @@ class NetdiskService {
             return {
               downloadUrl: allUrls[0],
               downloadUrls: allUrls,
+              fileSize: targetFileSize,
               headers: [
                 `User-Agent: ${this.baiduPcsUa}`,
                 `Cookie: ${cookieHeader}`

@@ -328,11 +328,12 @@ ipcMain.handle('netdisk:getBaiduDownloadUrl', async (event, params) => {
     userAgent: ua,
     cookie: cookieStr,
     referer: '',
-    fileName: params.file_name
+    fileName: params.file_name,
+    fileSize: params.file_size || dl.fileSize
   });
   return {
     downloadUrl: proxy.proxyUrl,
-    downloadUrls: proxy.proxyUrls,
+    downloadUrls: [proxy.proxyUrl],
     headers: []
   };
 });
